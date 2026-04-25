@@ -78,15 +78,12 @@ float res2 = 0;
 
 float LFO1AMP = 0;
 float LFO1FREQ = 0;
-float LFO1MATH = 0;
 
 float LFO2AMP = 0;
 float LFO2FREQ = 0;
-float LFO2MATH = 0;
 
 float LFO3AMP = 0;
 float LFO3FREQ = 0;
-float LFO3MATH = 0;
 
 int waveSelect1 = 0;
 int waveSelect2 = 0;
@@ -121,9 +118,9 @@ int currentPEDAL = 0;
 
 int waveSelect = 0;
 
-// Buffer for interpolated wavetable (AKWF tables are 256 samples)
 static int16_t blendedWave[256];
-static float lastWavePos = -1.0f;
+static float smoothWavePos = 0.0f;
+static float lastRenderedWavePos = -1.0f;
 
 // Software LFOs (drive LEDs and phaser)
 static float lfo1Phase = 0.0f;
@@ -144,6 +141,7 @@ static float lfo3PrevPhase = 1.0f;
 static float lfo1Out = 0.0f;
 static float lfo2Out = 0.0f;
 static float lfo3Out = 0.0f;
+static float smoothPhaserFreq = 1000.0f;
 
 
 #include "AKWF_R.H"
@@ -245,6 +243,11 @@ WaveTable waveTables[TABLE_NUM] {
   AKWF_granular_0020,
   AKWF_granular_0033,
   AKWF_hvoice_0030,
+  AKWF_overtone_0001,
+  AKWF_overtone_0005,
+  AKWF_overtone_0017,
+  AKWF_overtone_0026,
+  AKWF_overtone_0028,
   AKWF_hvoice_0033,
   AKWF_hvoice_0035,
   AKWF_hvoice_0036,
@@ -254,11 +257,6 @@ WaveTable waveTables[TABLE_NUM] {
   AKWF_hvoice_0054,
   AKWF_hvoice_0056,
   AKWF_hvoice_0071,
-  AKWF_overtone_0001,
-  AKWF_overtone_0005,
-  AKWF_overtone_0017,
-  AKWF_overtone_0026,
-  AKWF_overtone_0028,
 };
 
 short waveShapesLFO1[6] = {
@@ -293,19 +291,19 @@ float mapfloat(float x, float in_min, float in_max, float out_min, float out_max
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-void setPhaserStage(int stage, float freq, float q) {
+void setPhaserStage(AudioFilterBiquad &filt, int stage, float freq, float q) {
   double w0    = (double)freq * (2.0 * PI / 44100.0);
   double cosW0 = cos(w0);
   double alpha = sin(w0) / (2.0 * (double)q);
   double norm  = 1.0 + alpha;
   double c[5]  = {
-    (1.0 - alpha) / norm,  // b0
-    -2.0 * cosW0  / norm,  // b1
-    1.0,                   // b2
-    -2.0 * cosW0  / norm,  // a1
-    (1.0 - alpha) / norm   // a2
+    (1.0 - alpha) / norm,
+    -2.0 * cosW0  / norm,
+    1.0,
+    -2.0 * cosW0  / norm,
+    (1.0 - alpha) / norm
   };
-  filter1.setCoefficients(stage, c);
+  filt.setCoefficients(stage, c);
 }
 
 void setup() {
@@ -332,34 +330,33 @@ void loop() {
   currentPEDAL = analogRead(A0);
   diffPEDAL = currentPEDAL - smoothPEDAL;
   smoothPEDAL = smoothPEDAL + (diffPEDAL * 0.9f); // Lower decimal value = more smoothing
-  expPedal = map(smoothPEDAL, 1, 1023, -512, 512);
+  expPedal = map(smoothPEDAL, 1, 1023, 0, 1023);
 
   // MAIN OSCILLATOR FREQUENCY & AMPLITUDE
   waveform1.amplitude(0.8f);
   currentADCOSC = analogRead(A1);
   diffOSC = currentADCOSC - smoothADCOSC;
-  smoothADCOSC = smoothADCOSC + (diffOSC * 0.005); // Decimal value is digital lowpass, lower value = more slew
+  smoothADCOSC = smoothADCOSC + (diffOSC * 0.4f);
   osc1 = mapfloat(smoothADCOSC, 0, 1023, 1.0f, 500.0f);
   waveform1.frequency(osc1);
 
   // MAIN OSCILLATOR WAVETABLE SELECTION WITH INTERPOLATION
   currentWAVE = analogRead(A3);
   diffWAVE = currentWAVE - smoothWAVE;
-  smoothWAVE = smoothWAVE + (diffWAVE * 0.004f); // Decimal value is digital lowpass, lower value = more slew
+  smoothWAVE = smoothWAVE + (diffWAVE * 0.05f);
 
-  // Compute fractional position across the wavetable array
-  float wavePos = mapfloat(smoothWAVE, 0, 1023, 0.0f, (float)(TABLE_NUM - 1));
-  // Only recompute blend when position changes enough to avoid ADC noise artifacts
-  if (fabsf(wavePos - lastWavePos) > 0.2f) {
-    lastWavePos = wavePos;
+  float targetWavePos = mapfloat(smoothWAVE, 0, 1023, 0.0f, (float)(TABLE_NUM - 2));
+  smoothWavePos += (targetWavePos - smoothWavePos) * 0.05f;
+  smoothWavePos = constrain(smoothWavePos, 0.0f, (float)(TABLE_NUM - 2));
 
-    int waveIndexA = constrain((int)wavePos, 0, TABLE_NUM - 2);
-    int waveIndexB = waveIndexA + 1;
-    float blendAmt = constrain(wavePos - (float)waveIndexA, 0.0f, 1.0f);
+  int waveIndexA = constrain((int)smoothWavePos, 0, TABLE_NUM - 1);
+  int waveIndexB = waveIndexA + 1;
+  float blendAmt = constrain(smoothWavePos - (float)waveIndexA, 0.0f, 1.0f);
 
+  if (fabsf(smoothWavePos - lastRenderedWavePos) > 0.01f) {
+    lastRenderedWavePos = smoothWavePos;
     int16_t* waveA = const_cast<int16_t*>(waveTables[waveIndexA].table);
     int16_t* waveB = const_cast<int16_t*>(waveTables[waveIndexB].table);
-
     AudioNoInterrupts();
     for (int i = 0; i < 256; i++) {
       blendedWave[i] = (int16_t)((float)waveA[i] * (1.0f - blendAmt) + (float)waveB[i] * blendAmt);
@@ -387,23 +384,19 @@ void loop() {
   mixer1.gain(3, 0.0);
 
   // PHASER (FILTER 1) - 4-stage AudioFilterBiquad allpass + dry/wet mix
-  cutoff1 = mapfloat(analogRead(A5), 0, 1023, 80.0f, 5000.0f);
+  cutoff1 = mapfloat(constrain(analogRead(A5) + expPedal, 0, 1023), 0, 1023, 100.0f, 4500.0f);
   { float resRaw = analogRead(A6) / 1023.0f;
-    res1 = resRaw * resRaw * 0.65f; }  // quadratic curve: gentle low end, aggressive top (max 0.65)
+    res1 = resRaw * resRaw * 0.7f; }  // quadratic curve: gentle low end, aggressive top (max 0.65)
   mixer1.gain(2, res1);
 
   // LFO 1
   waveSelect2 = map(analogRead(A9), 0, 1023, 0, 5);
   waveform3.begin(waveShapesLFO1[waveSelect2]);
-  waveform3.arbitraryWaveform(waveShapesLFO1, 100.0f);
 
-  LFO1MATH = expPedal + analogRead(A10);
-  LFO1MATH = max(LFO1MATH, 0);
-  LFO1MATH = min(LFO1MATH, 1023);
-  LFO1FREQ = 0.05f * powf(10000.0f, LFO1MATH / 1023.0f);
+  LFO1FREQ = mapfloat(analogRead(A10), 0, 1023, 0.01f, 50.0f);
   waveform3.frequency(LFO1FREQ);
 
-  LFO1AMP = mapfloat(analogRead(A11), 0, 1023, 0.0f, 2.0f);
+  LFO1AMP = mapfloat(analogRead(A11), 0, 1023, 0.0f, 1.0f);
   waveform3.amplitude(LFO1AMP);
 
   // Software LFO sweeps all 4 allpass stages
@@ -428,11 +421,10 @@ void loop() {
       break;
   }
 
-  float phaserFreq = constrain(cutoff1 + lfo1Out * LFO1AMP * cutoff1, 100.0f, 8000.0f);
-  setPhaserStage(0, phaserFreq, 0.707f);
-  setPhaserStage(1, phaserFreq, 0.707f);
-  setPhaserStage(2, phaserFreq, 0.707f);
-  setPhaserStage(3, phaserFreq, 0.707f);
+  float targetPhaserFreq = constrain(cutoff1 + lfo1Out * LFO1AMP * 4400.0f, 300.0f, 4000.0f);
+  smoothPhaserFreq += (targetPhaserFreq - smoothPhaserFreq) * 0.05f;
+  setPhaserStage(filter1, 0, smoothPhaserFreq, 0.707f);
+  setPhaserStage(filter1, 1, smoothPhaserFreq, 0.707f);
 
   // SAMPLE RATE AND BIT DEPTH
   sampleRedux = map(analogRead(A19), 0, 1023, 18000, 400);
@@ -441,7 +433,7 @@ void loop() {
   bitcrusher1.bits(bitRate);
 
   // FILTER 2
-  cutoff2 = mapfloat(analogRead(A7), 0, 1023, 80.0f, 15000.0f);
+  cutoff2 = mapfloat(constrain(analogRead(A7) + expPedal, 0, 1023), 0, 1023, 80.0f, 15000.0f);
   res2 = mapfloat(analogRead(A8), 0, 1023, 1.5f, 5.0f);
   filter2.frequency(cutoff2);
   filter2.resonance(res2);
@@ -449,12 +441,8 @@ void loop() {
   // LFO 2
   waveSelect3 = map(analogRead(A12), 0, 1023, 0, 5);
   waveform4.begin(waveShapesLFO2[waveSelect3]);
-  waveform4.arbitraryWaveform(waveShapesLFO3, 100.0f);
 
-  LFO2MATH = expPedal + analogRead(A13);
-  LFO2MATH = max(LFO2MATH, 0);
-  LFO2MATH = min(LFO2MATH, 1023);
-  LFO2FREQ = 0.05f * powf(10000.0f, LFO2MATH / 1023.0f);
+  LFO2FREQ = mapfloat(analogRead(A13), 0, 1023, 0.01f, 50.0f);
   waveform4.frequency(LFO2FREQ);
 
   LFO2AMP = mapfloat(analogRead(A15), 0, 1023, 0.0f, 1.0f);
@@ -489,12 +477,8 @@ void loop() {
   // LFO 3
   waveSelect4 = map(analogRead(A16), 0, 1023, 0, 5);
   waveform5.begin(waveShapesLFO3[waveSelect4]);
-  waveform5.arbitraryWaveform(waveShapesLFO3, 100.0f);
 
-  LFO3MATH = expPedal + analogRead(A17);
-  LFO3MATH = max(LFO3MATH, 0);
-  LFO3MATH = min(LFO3MATH, 1023);
-  LFO3FREQ = 0.05f * powf(10000.0f, LFO3MATH / 1023.0f);
+  LFO3FREQ = mapfloat(analogRead(A17), 0, 1023, 0.01f, 50.0f);
   waveform5.frequency(LFO3FREQ);
 
   LFO3AMP = mapfloat(analogRead(A18), 0, 1023, 0.0f, 1.0f);
@@ -520,13 +504,13 @@ void loop() {
   }
 
   // Final Output Attenuator
-  mixer2.gain(0, 0.2f);
+  mixer2.gain(0, 0.8f);
   mixer2.gain(1, 0.0f);
   mixer2.gain(2, 0.0f);
   mixer2.gain(3, 0.0f);
 
-  // LEDs: map instantaneous LFO value (-1..+1) to full brightness range (0..255)
-  analogWrite(4, (int)((lfo1Out * 0.5f + 0.5f) * 255.0f));
-  analogWrite(5, (int)((lfo2Out * 0.5f + 0.5f) * 255.0f));
-  analogWrite(6, (int)((lfo3Out * 0.5f + 0.5f) * 255.0f));
+  // LEDs: brightness proportional to depth knob
+  analogWrite(4, (int)((lfo1Out * 0.5f + 0.5f) * LFO1AMP * 255.0f));
+  analogWrite(5, (int)((lfo2Out * 0.5f + 0.5f) * LFO2AMP * 255.0f));
+  analogWrite(6, (int)((lfo3Out * 0.5f + 0.5f) * LFO3AMP * 255.0f));
 }
