@@ -384,7 +384,7 @@ void loop() {
   mixer1.gain(3, 0.0);
 
   // PHASER (FILTER 1) - 4-stage AudioFilterBiquad allpass + dry/wet mix
-  cutoff1 = mapfloat(constrain(analogRead(A5) + expPedal, 0, 1023), 0, 1023, 100.0f, 4500.0f);
+  cutoff1 = mapfloat(analogRead(A5), 0, 1023, 100.0f, 4500.0f);
   { float resRaw = analogRead(A6) / 1023.0f;
     res1 = resRaw * resRaw * 0.7f; }  // quadratic curve: gentle low end, aggressive top (max 0.65)
   mixer1.gain(2, res1);
@@ -421,7 +421,8 @@ void loop() {
       break;
   }
 
-  float targetPhaserFreq = constrain(cutoff1 + lfo1Out * LFO1AMP * 4400.0f, 300.0f, 4000.0f);
+  float pedalPhaser = mapfloat(expPedal, 0, 1023, 0.0f, 4400.0f);
+  float targetPhaserFreq = constrain(cutoff1 + (pedalPhaser + lfo1Out * LFO1AMP * 4400.0f), 300.0f, 4000.0f);
   smoothPhaserFreq += (targetPhaserFreq - smoothPhaserFreq) * 0.05f;
   setPhaserStage(filter1, 0, smoothPhaserFreq, 0.707f);
   setPhaserStage(filter1, 1, smoothPhaserFreq, 0.707f);
@@ -433,7 +434,8 @@ void loop() {
   bitcrusher1.bits(bitRate);
 
   // FILTER 2
-  cutoff2 = mapfloat(constrain(analogRead(A7) + expPedal, 0, 1023), 0, 1023, 80.0f, 15000.0f);
+  float pedalFilter2 = mapfloat(expPedal, 0, 1023, 0.0f, 14920.0f);
+  cutoff2 = constrain(mapfloat(analogRead(A7), 0, 1023, 80.0f, 15000.0f) + pedalFilter2, 80.0f, 15000.0f);
   res2 = mapfloat(analogRead(A8), 0, 1023, 1.5f, 5.0f);
   filter2.frequency(cutoff2);
   filter2.resonance(res2);
